@@ -1,788 +1,788 @@
--- MatchaRayfield (Linoria-style) — Drawing-based UI for Matcha LuaVM
--- Author: ChatGPT (adapted for your Drawing API)
--- Paste and run in your VM (requires Drawing.new & game services)
+-- MatchaLinoria (Drawing-based Linoria-style UI for Matcha LuaVM)
+-- Author: ChatGPT (adapted to provided Drawing + input API)
+-- Features: Create window, tabs, sections, buttons, toggles, sliders, dropdowns, color picker, textbox
+-- Input: Players.LocalPlayer:GetMouse(), ismouse1pressed(), iskeypressed(vk)
+-- Toggle UI: Delete key (VK 0x2E)
 
--- ===== Environment helpers =====
+-- ---------- Configuration & Helpers ----------
 local Players = (pcall(function() return game:GetService("Players") end) and game:GetService("Players")) or nil
 local LocalPlayer = Players and Players.LocalPlayer
-local Mouse = nil
-if LocalPlayer and pcall(function() return LocalPlayer.GetMouse end) then
-    Mouse = LocalPlayer:GetMouse()
-else
-    -- Minimal fallback mouse-like table (won't do clicks)
-    Mouse = { X = 0, Y = 0, Button1Down = false }
-end
+local Mouse = (LocalPlayer and pcall(function() return LocalPlayer:GetMouse() end)) and LocalPlayer:GetMouse() or { X = 0, Y = 0 }
+local TaskWait = task and task.wait or wait
 
-local UserInputService = (pcall(function() return game:GetService("UserInputService") end) and game:GetService("UserInputService")) or nil
-local RunService = (pcall(function() return game:GetService("RunService") end) and game:GetService("RunService")) or nil
-local task_wait = task and task.wait or wait
+-- VM input helpers assumed present:
+-- ismouse1pressed() -> bool
+-- iskeypressed(vk:int) -> bool
 
--- ===== Theme (Linoria-style) =====
-local Theme = {
+-- Basic theme (Linoria default)
+local DefaultTheme = {
     Background = Color3.fromRGB(26,26,28),
     Panel = Color3.fromRGB(34,34,36),
-    Accent = Color3.fromRGB(0, 150, 255),
+    Accent = Color3.fromRGB(0,150,255),
     Text = Color3.fromRGB(230,230,230),
     SubText = Color3.fromRGB(160,160,160),
     Hover = Color3.fromRGB(46,46,48),
     Disabled = Color3.fromRGB(60,60,62)
 }
 
--- ===== Drawing helpers =====
-local Created = {} -- keep references for cleanup
-local function createDrawing(kind, props)
+-- Drawing creation wrapper
+local CreatedDrawings = {}
+local function newDraw(kind, props)
     local ok, obj = pcall(function() return Drawing.new(kind) end)
     if not ok or not obj then return nil end
-    for k,v in pairs(props or {}) do
-        pcall(function() obj[k] = v end)
-    end
-    table.insert(Created, obj)
+    for k,v in pairs(props or {}) do pcall(function() obj[k] = v end) end
+    table.insert(CreatedDrawings, obj)
     return obj
 end
 
-local function removeDrawing(obj)
+local function removeDraw(obj)
     if not obj then return end
     pcall(function() obj:Remove() end)
-    for i,v in ipairs(Created) do
-        if v == obj then table.remove(Created, i); break end
+    for i,v in ipairs(CreatedDrawings) do
+        if v == obj then table.remove(CreatedDrawings,i); break end
     end
 end
 
--- clamp helper
+local function cleanupAll()
+    for _,d in ipairs(CreatedDrawings) do pcall(function() d:Remove() end) end
+    CreatedDrawings = {}
+end
+
 local function clamp(n,a,b) return math.max(a, math.min(b, n)) end
-
--- simple click detection
-local function isMouseInRect(x,y,w,h)
-    return Mouse and Mouse.X >= x and Mouse.X <= x + w and Mouse.Y >= y and Mouse.Y <= y + h
+local function insideRect(x,y,w,h, mx, my)
+    return mx >= x and mx <= x + w and my >= y and my <= y + h
 end
 
--- ===== UI core =====
-local UI = {}
-UI.__index = UI
+-- VK mapping helpers for basic typing
+local VK = {
+    BACKSPACE = 0x08,
+    TAB = 0x09,
+    ENTER = 0x0D,
+    SHIFT = 0x10,
+    CTRL = 0x11,
+    ALT = 0x12,
+    PAUSE = 0x13,
+    CAPS = 0x14,
+    ESC = 0x1B,
+    SPACE = 0x20,
+    PAGEUP = 0x21,
+    PAGEDOWN = 0x22,
+    END = 0x23,
+    HOME = 0x24,
+    LEFT = 0x25,
+    UP = 0x26,
+    RIGHT = 0x27,
+    DOWN = 0x28,
+    INSERT = 0x2D,
+    DELETE = 0x2E
+}
+-- letters A-Z: 0x41 - 0x5A ; digits 0-9: 0x30 - 0x39
 
-function UI:Destroy()
-    -- remove all drawings
-    for _,d in ipairs(Created) do
-        pcall(function() d:Remove() end)
-    end
-    Created = {}
-    -- stop loops if needed
-    self._running = false
-end
+-- ---------- UI Library ----------
+local MatchaLinoria = {}
+MatchaLinoria.__index = MatchaLinoria
+MatchaLinoria.Theme = {}
+for k,v in pairs(DefaultTheme) do MatchaLinoria.Theme[k] = v end
 
--- Create a window
-function UI.NewWindow(opts)
+function MatchaLinoria:CreateWindow(opts)
     opts = opts or {}
-    local title = opts.Title or "MatchaRayfield (Linoria)"
-    local pos = opts.Position or Vector2.new(150, 120)
-    local size = opts.Size or Vector2.new(520, 380)
-    local win = setmetatable({}, UI)
-    win.Position = pos
-    win.Size = size
-    win.Title = title
+    local win = {}
+    win.Title = opts.Title or "MatchaLinoria"
+    win.Position = opts.Position or Vector2.new(200,120)
+    win.Size = opts.Size or Vector2.new(560, 420)
     win.Visible = true
-    win._elements = {} -- store elements for layout & interaction
-    win._dragging = false
-    win._dragOffset = Vector2.new(0,0)
-    win._focusedTextbox = nil
+    win.Theme = {}
+    for k,v in pairs(MatchaLinoria.Theme) do win.Theme[k] = v end
+    if opts.Theme then for k,v in pairs(opts.Theme) do win.Theme[k] = v end end
 
-    -- Create background panel
-    win._bg = createDrawing("Square", {
-        Color = Theme.Background,
-        Transparency = 1,
-        Size = size,
-        Position = pos,
-        Filled = true,
-        Visible = true,
-        ZIndex = 1
-    })
-
-    -- Header bar
-    win._header = createDrawing("Square", {
-        Color = Theme.Panel,
-        Transparency = 1,
-        Size = Vector2.new(size.X, 28),
-        Position = Vector2.new(pos.X, pos.Y),
-        Filled = true,
-        Visible = true,
-        ZIndex = 2
-    })
-
-    -- Title text
-    win._title = createDrawing("Text", {
-        Text = title,
-        Color = Theme.Text,
-        Position = Vector2.new(pos.X + 10, pos.Y + 5),
-        Size = 18,
-        Outline = true,
-        Visible = true,
-        ZIndex = 3
-    })
-
-    -- close button (simple X)
-    win._close = createDrawing("Text", {
-        Text = "X",
-        Color = Theme.Text,
-        Position = Vector2.new(pos.X + size.X - 24, pos.Y + 4),
-        Size = 18,
-        Outline = true,
-        Visible = true,
-        ZIndex = 3
-    })
-
-    -- tabs container (we'll draw buttons)
-    win._tabButtons = {}
+    -- internal state
+    win._tabs = {}
     win._pages = {}
     win._activePage = nil
+    win._running = true
+    win._mousePrev = false
+    win._keyPrev = {}
+    win._focusedTextBox = nil
+    win._zIndex = 1
 
-    -- layout cursor inside content
-    win._contentOrigin = Vector2.new(pos.X + 10, pos.Y + 38)
-    win._cursorY = 0
+    -- Drawing objects
+    -- Background panel
+    local bg = newDraw("Square", {
+        Color = win.Theme.Background,
+        Transparency = 1,
+        Filled = true,
+        Position = win.Position,
+        Size = win.Size,
+        Visible = true,
+        ZIndex = win._zIndex
+    })
+    -- Header bar
+    local header = newDraw("Square", {
+        Color = win.Theme.Panel,
+        Transparency = 1,
+        Filled = true,
+        Position = Vector2.new(win.Position.X, win.Position.Y),
+        Size = Vector2.new(win.Size.X, 28),
+        Visible = true,
+        ZIndex = win._zIndex + 1
+    })
+    local titleText = newDraw("Text", {
+        Text = win.Title,
+        Color = win.Theme.Text,
+        Position = Vector2.new(win.Position.X + 10, win.Position.Y + 5),
+        Size = 18,
+        Outline = true,
+        Visible = true,
+        ZIndex = win._zIndex + 2
+    })
+    local closeText = newDraw("Text", {
+        Text = "X",
+        Color = win.Theme.Text,
+        Position = Vector2.new(win.Position.X + win.Size.X - 22, win.Position.Y + 4),
+        Size = 18,
+        Outline = true,
+        Visible = true,
+        ZIndex = win._zIndex + 2
+    })
 
-    -- input tracking state
-    win._mousePrevDown = false
+    -- Tab button holder (we draw tab rects later)
+    win._drawObjects = {
+        bg = bg, header = header, titleText = titleText, closeText = closeText
+    }
 
-    -- make window draggable (by header)
-    local function headerInputLoop()
-        -- we will update dragging state inside global render/update loop
+    -- layout helpers
+    local contentOrigin = Vector2.new(win.Position.X + 10, win.Position.Y + 38)
+
+    -- helpers to update positions when moving window
+    local function repositionAll()
+        -- update bg/header/title/close
+        if bg  then pcall(function() bg.Position = win.Position; bg.Size = win.Size end) end
+        if header then pcall(function() header.Position = Vector2.new(win.Position.X, win.Position.Y); header.Size = Vector2.new(win.Size.X,28) end) end
+        if titleText then pcall(function() titleText.Position = Vector2.new(win.Position.X + 10, win.Position.Y + 5) end) end
+        if closeText then pcall(function() closeText.Position = Vector2.new(win.Position.X + win.Size.X - 22, win.Position.Y + 4) end) end
+
+        contentOrigin = Vector2.new(win.Position.X + 10, win.Position.Y + 38)
+        -- reposition tabs
+        for i,tab in ipairs(win._tabs) do
+            local bx = win.Position.X + 8 + (i-1)*100
+            pcall(function() tab.drawRect.Position = Vector2.new(bx, win.Position.Y + 32) end)
+            pcall(function() tab.drawText.Position = Vector2.new(bx + 8, win.Position.Y + 34) end)
+            -- reposition page elements
+            if tab.page then
+                for sIndex,section in ipairs(tab.page.sections) do
+                    pcall(function() section.headerRect.Position = Vector2.new(contentOrigin.X, contentOrigin.Y + section.yOffset) end)
+                    pcall(function() section.headerText.Position = Vector2.new(contentOrigin.X + 8, contentOrigin.Y + section.yOffset + 4) end)
+                    for _,it in ipairs(section.items) do
+                        if it.Type == "Button" then
+                            pcall(function()
+                                it.Rect.Position = Vector2.new(contentOrigin.X + 6, contentOrigin.Y + it._y)
+                                it.Text.Position = Vector2.new(contentOrigin.X + 12, contentOrigin.Y + it._y + 6)
+                            end)
+                        elseif it.Type == "Toggle" then
+                            pcall(function()
+                                it.Box.Position = Vector2.new(contentOrigin.X + 8, contentOrigin.Y + it._y + 4)
+                                it.Label.Position = Vector2.new(contentOrigin.X + 8 + it.Box.Size.X + 8, contentOrigin.Y + it._y + 4)
+                            end)
+                        elseif it.Type == "Slider" then
+                            pcall(function()
+                                it.Bg.Position = Vector2.new(contentOrigin.X + 12, contentOrigin.Y + it._y + 18)
+                                it.Fill.Position = it.Bg.Position
+                                it.Label.Position = Vector2.new(it.Bg.Position.X, it.Bg.Position.Y - 18)
+                            end)
+                        elseif it.Type == "Dropdown" then
+                            pcall(function()
+                                it.Box.Position = Vector2.new(contentOrigin.X + 12, contentOrigin.Y + it._y)
+                                it.Label.Position = Vector2.new(contentOrigin.X + 18, contentOrigin.Y + it._y + 4)
+                                -- option rects reposition if expanded
+                                if it.Expanded and it.OptionRects then
+                                    for idx,optRect in ipairs(it.OptionRects) do
+                                        optRect.rect.Position = Vector2.new(it.Box.Position.X, it.Box.Position.Y + idx*26)
+                                        optRect.txt.Position = Vector2.new(it.Box.Position.X + 6, it.Box.Position.Y + idx*26 + 4)
+                                    end
+                                end
+                            end)
+                        elseif it.Type == "ColorPicker" then
+                            pcall(function()
+                                it.Preview.Position = Vector2.new(contentOrigin.X + 12, contentOrigin.Y + it._y)
+                                it.Title.Position = Vector2.new(it.Preview.Position.X + 56, it.Preview.Position.Y + 2)
+                                -- sliders reposition
+                                for iS,sl in ipairs({it.R, it.G, it.B}) do
+                                    sl.Bg.Position = Vector2.new(it.Preview.Position.X + 56, it.Preview.Position.Y + (iS-1)*28)
+                                    sl.Fill.Position = sl.Bg.Position
+                                    sl.Label.Position = Vector2.new(sl.Bg.Position.X, sl.Bg.Position.Y - 18)
+                                end
+                            end)
+                        elseif it.Type == "TextBox" then
+                            pcall(function()
+                                it.Box.Position = Vector2.new(contentOrigin.X + 12, contentOrigin.Y + it._y)
+                                it.Text.Position = Vector2.new(contentOrigin.X + 18, contentOrigin.Y + it._y + 4)
+                            end)
+                        end
+                    end
+                end
+            end
+        end
     end
 
-    -- addTab function
+    -- --------- Public API: AddTab, AddSection, and element creators ----------
     function win:AddTab(name)
-        local index = #win._tabButtons + 1
-        local btnX = win.Position.X + 8 + (index - 1) * 100
-        local btnPos = Vector2.new(btnX, win.Position.Y + 32)
-        local btnSize = Vector2.new(92, 20)
-
-        -- draw tab button rect & text
-        local btnRect = createDrawing("Square", {
-            Color = Theme.Panel,
-            Transparency = 1,
-            Size = btnSize,
-            Position = btnPos,
-            Filled = true,
-            Visible = true,
-            ZIndex = 4
+        local tab = { name = name, sections = {}, items = {} }
+        local index = #win._tabs + 1
+        local bx = win.Position.X + 8 + (index-1)*100
+        local btnRect = newDraw("Square", {
+            Color = win.Theme.Panel, Transparency = 1, Filled = true,
+            Position = Vector2.new(bx, win.Position.Y + 32), Size = Vector2.new(92, 20),
+            Visible = true, ZIndex = win._zIndex + 5
         })
-        local btnText = createDrawing("Text", {
-            Text = name,
-            Color = Theme.Text,
-            Position = Vector2.new(btnPos.X + 8, btnPos.Y + 2),
-            Size = 14,
-            Outline = true,
-            Visible = true,
-            ZIndex = 5
+        local btnText = newDraw("Text", {
+            Text = name, Color = win.Theme.Text,
+            Position = Vector2.new(bx + 8, win.Position.Y + 34), Size = 14,
+            Outline = true, Visible = true, ZIndex = win._zIndex + 6
         })
+        tab.drawRect = btnRect
+        tab.drawText = btnText
 
-        -- page container (logical)
-        local page = { Elements = {}, Name = name }
-        win._pages[name] = page
+        tab.page = { name = name, sections = {} }
+        win._pages[name] = tab.page
+        table.insert(win._tabs, tab)
 
-        -- click handler
-        table.insert(win._tabButtons, { Rect = btnRect, Text = btnText, Name = name, Page = page })
-
-        -- auto-select first
+        -- auto-select first tab
         if not win._activePage then
-            win._activePage = page
-            btnRect.Color = Theme.Accent
+            win._activePage = tab.page
+            btnRect.Color = win.Theme.Accent
         end
 
-        return page
+        return tab.page
     end
 
-    -- Adds a section (visual grouping) to a page
     function win:AddSection(page, title)
         page = page or win._activePage
-        local section = { Items = {}, Title = title }
-        -- compute Y
-        local y = win._cursorY
-        -- draw section header
-        local headerRect = createDrawing("Square", {
-            Color = Theme.Panel,
-            Transparency = 1,
-            Size = Vector2.new(win.Size.X - 20, 26),
-            Position = Vector2.new(win._contentOrigin.X, win._contentOrigin.Y + y),
-            Filled = true,
-            Visible = true,
-            ZIndex = 4
+        if not page then page = win:AddTab("Page") end
+        local section = { Title = title, items = {}, yOffset = 0, _cursor = 0 }
+        -- compute yOffset: sum of previous sections heights
+        local y = 0
+        for _,s in ipairs(page.sections) do y = y + 34 + (#s.items * 36) end
+        section.yOffset = y
+        -- header rect & text
+        local headerRect = newDraw("Square", {
+            Color = win.Theme.Panel, Transparency = 1, Filled = true,
+            Position = Vector2.new(contentOrigin.X, contentOrigin.Y + section.yOffset),
+            Size = Vector2.new(win.Size.X - 20, 26), Visible = true, ZIndex = win._zIndex + 4
         })
-        local headerText = createDrawing("Text", {
-            Text = title,
-            Color = Theme.Text,
-            Position = Vector2.new(win._contentOrigin.X + 8, win._contentOrigin.Y + y + 4),
-            Size = 16,
-            Outline = true,
-            Visible = true,
-            ZIndex = 5
+        local headerText = newDraw("Text", {
+            Text = title, Color = win.Theme.Text,
+            Position = Vector2.new(contentOrigin.X + 8, contentOrigin.Y + section.yOffset + 4),
+            Size = 16, Outline = true, Visible = true, ZIndex = win._zIndex + 5
         })
-        y = y + 34
-        section._headerRect = headerRect
-        section._headerText = headerText
-        section._yOffset = y
-        section._origin = Vector2.new(win._contentOrigin.X, win._contentOrigin.Y)
-        table.insert(page.Elements, section)
-        -- advance cursor
-        win._cursorY = y + 6
+        section.headerRect = headerRect
+        section.headerText = headerText
+        section._origin = contentOrigin
+        section._y = section.yOffset
+        table.insert(page.sections, section)
         return section
     end
 
-    -- Add Button to section
     function win:AddButton(section, label, callback)
-        section = section or (win._activePage and win._activePage.Elements[1]) -- fallback
-        local y = section._yOffset + (#section.Items * 34)
-        local x = section._origin.X
+        section = section or (win._activePage and win._activePage.sections[1])
+        if not section then return end
+        local y = section._y + (#section.items * 36) + 8
+        local x = contentOrigin.X
         local w = win.Size.X - 40
         local h = 28
-        local rect = createDrawing("Square", {
-            Color = Theme.Panel,
-            Transparency = 1,
-            Size = Vector2.new(w, h),
-            Position = Vector2.new(x + 6, win._contentOrigin.Y + y),
-            Filled = true,
-            Visible = true,
-            ZIndex = 6
+        local rect = newDraw("Square", {
+            Color = win.Theme.Panel, Transparency = 1, Filled = true,
+            Position = Vector2.new(x + 6, contentOrigin.Y + y), Size = Vector2.new(w, h),
+            Visible = true, ZIndex = win._zIndex + 6
         })
-        local txt = createDrawing("Text", {
-            Text = label,
-            Color = Theme.Text,
-            Position = Vector2.new(x + 12, win._contentOrigin.Y + y + 6),
-            Size = 15,
-            Outline = true,
-            Visible = true,
-            ZIndex = 7
+        local txt = newDraw("Text", {
+            Text = label, Color = win.Theme.Text,
+            Position = Vector2.new(x + 12, contentOrigin.Y + y + 6), Size = 15,
+            Outline = true, Visible = true, ZIndex = win._zIndex + 7
         })
-        local item = { Type = "Button", Rect = rect, Text = txt, X = x + 6, Y = win._contentOrigin.Y + y, W = w, H = h, Callback = callback }
-        table.insert(section.Items, item)
-        win._cursorY = win._cursorY + 34
+        local item = { Type = "Button", Rect = rect, Text = txt, X = x + 6, Y = contentOrigin.Y + y, W = w, H = h, Callback = callback, _y = y }
+        table.insert(section.items, item)
         return item
     end
 
-    -- Add Toggle to section
     function win:AddToggle(section, label, default, callback)
-        section = section or (win._activePage and win._activePage.Elements[1])
-        local y = section._yOffset + (#section.Items * 34)
-        local x = section._origin.X
+        section = section or (win._activePage and win._activePage.sections[1])
+        if not section then return end
+        default = default and true or false
+        local y = section._y + (#section.items * 36) + 8
+        local x = contentOrigin.X
         local boxSize = 20
-        local box = createDrawing("Square", {
-            Color = default and Theme.Accent or Theme.Panel,
-            Transparency = 1,
-            Size = Vector2.new(boxSize, boxSize),
-            Position = Vector2.new(x + 8, win._contentOrigin.Y + y + 4),
-            Filled = true,
-            Visible = true,
-            ZIndex = 6
+        local box = newDraw("Square", {
+            Color = default and win.Theme.Accent or win.Theme.Panel,
+            Transparency = 1, Filled = true,
+            Position = Vector2.new(x + 8, contentOrigin.Y + y + 4),
+            Size = Vector2.new(boxSize, boxSize), Visible = true, ZIndex = win._zIndex + 6
         })
-        local txt = createDrawing("Text", {
-            Text = label,
-            Color = Theme.Text,
-            Position = Vector2.new(x + 8 + boxSize + 8, win._contentOrigin.Y + y + 4),
-            Size = 15,
-            Outline = true,
-            Visible = true,
-            ZIndex = 7
+        local lbl = newDraw("Text", {
+            Text = label, Color = win.Theme.Text,
+            Position = Vector2.new(x + 8 + boxSize + 8, contentOrigin.Y + y + 4), Size = 15,
+            Outline = true, Visible = true, ZIndex = win._zIndex + 7
         })
-        local state = default and true or false
-        local item = { Type = "Toggle", Box = box, Text = txt, State = state, X = x + 8, Y = win._contentOrigin.Y + y + 4, W = boxSize, H = boxSize, Callback = callback }
-        table.insert(section.Items, item)
-        win._cursorY = win._cursorY + 30
+        local item = { Type = "Toggle", Box = box, Label = lbl, State = default, Callback = callback, X = x + 8, Y = contentOrigin.Y + y + 4, W = boxSize, H = boxSize, _y = y }
+        table.insert(section.items, item)
         return item
     end
 
-    -- Add Slider (horizontal)
-    function win:AddSlider(section, label, min, max, default, callback)
-        section = section or (win._activePage and win._activePage.Elements[1])
-        min = min or 0; max = max or 100; default = default or min
-        local y = section._yOffset + (#section.Items * 46)
-        local x = section._origin.X
+    function win:AddSlider(section, label, min, max, default, step, callback)
+        section = section or (win._activePage and win._activePage.sections[1])
+        if not section then return end
+        min = min or 0; max = max or 100; default = default or min; step = step or 1
+        local y = section._y + (#section.items * 46) + 8
+        local x = contentOrigin.X
         local width = win.Size.X - 60
-        local barH = 8
         local barX = x + 12
-        local barY = win._contentOrigin.Y + y + 18
+        local barY = contentOrigin.Y + y + 18
 
-        local backgroundBar = createDrawing("Square", {
-            Color = Theme.Panel,
-            Transparency = 1,
-            Size = Vector2.new(width, barH),
-            Position = Vector2.new(barX, barY),
-            Filled = true,
-            Visible = true,
-            ZIndex = 6
+        local bg = newDraw("Square", {
+            Color = win.Theme.Panel, Transparency = 1, Filled = true,
+            Position = Vector2.new(barX, barY), Size = Vector2.new(width, 8), Visible = true, ZIndex = win._zIndex + 6
         })
-
         local fillPct = clamp((default - min) / (max - min), 0, 1)
-        local fillBar = createDrawing("Square", {
-            Color = Theme.Accent,
-            Transparency = 1,
-            Size = Vector2.new(width * fillPct, barH),
-            Position = Vector2.new(barX, barY),
-            Filled = true,
-            Visible = true,
-            ZIndex = 7
+        local fill = newDraw("Square", {
+            Color = win.Theme.Accent, Transparency = 1, Filled = true,
+            Position = Vector2.new(barX, barY), Size = Vector2.new(width * fillPct, 8), Visible = true, ZIndex = win._zIndex + 7
         })
-
-        local labelText = createDrawing("Text", {
+        local labelText = newDraw("Text", {
             Text = label .. " : " .. tostring(default),
-            Color = Theme.Text,
-            Position = Vector2.new(barX, barY - 18),
-            Size = 14,
-            Outline = true,
-            Visible = true,
-            ZIndex = 7
+            Color = win.Theme.Text, Position = Vector2.new(barX, barY - 18),
+            Size = 14, Outline = true, Visible = true, ZIndex = win._zIndex + 7
         })
-
-        local value = default
-        local dragging = false
-
-        local item = {
-            Type = "Slider",
-            Bg = backgroundBar,
-            Fill = fillBar,
-            Label = labelText,
-            Min = min, Max = max, Value = value,
-            X = barX, Y = barY, W = width, H = barH,
-            Drag = false,
-            Callback = callback
-        }
-
-        table.insert(section.Items, item)
-        win._cursorY = win._cursorY + 46
+        local item = { Type = "Slider", Bg = bg, Fill = fill, Label = labelText, Min = min, Max = max, Value = default, Step = step, X = barX, Y = barY, W = width, H = 8, Callback = callback, _y = y }
+        table.insert(section.items, item)
         return item
     end
 
-    -- Add Dropdown
     function win:AddDropdown(section, label, options, default, callback)
-        section = section or (win._activePage and win._activePage.Elements[1])
-        local y = section._yOffset + (#section.Items * 40)
-        local x = section._origin.X
+        section = section or (win._activePage and win._activePage.sections[1])
+        if not section then return end
+        local y = section._y + (#section.items * 40) + 8
+        local x = contentOrigin.X
         local w = win.Size.X - 60
         local h = 24
-
-        local box = createDrawing("Square", {
-            Color = Theme.Panel,
-            Transparency = 1,
-            Size = Vector2.new(w, h),
-            Position = Vector2.new(x + 12, win._contentOrigin.Y + y),
-            Filled = true,
-            Visible = true,
-            ZIndex = 6
+        local box = newDraw("Square", {
+            Color = win.Theme.Panel, Transparency = 1, Filled = true,
+            Position = Vector2.new(x + 12, contentOrigin.Y + y), Size = Vector2.new(w, h), Visible = true, ZIndex = win._zIndex + 6
         })
-
-        local labelText = createDrawing("Text", {
-            Text = label .. ": " .. (default or "<select>"),
-            Color = Theme.Text,
-            Position = Vector2.new(x + 18, win._contentOrigin.Y + y + 4),
-            Size = 14,
-            Outline = true,
-            Visible = true,
-            ZIndex = 7
+        local labelText = newDraw("Text", {
+            Text = label .. ": " .. tostring(default or "<select>"), Color = win.Theme.Text,
+            Position = Vector2.new(x + 18, contentOrigin.Y + y + 4), Size = 14, Outline = true, Visible = true, ZIndex = win._zIndex + 7
         })
-
-        local expanded = false
-        local optionRects = {}
-        local current = default
-
         local item = {
-            Type = "Dropdown",
-            Box = box, Label = labelText,
-            Options = options, Current = current, Expanded = expanded,
-            X = x + 12, Y = win._contentOrigin.Y + y, W = w, H = h, Callback = callback
+            Type = "Dropdown", Box = box, Label = labelText, Options = options or {}, Current = default, Expanded = false,
+            OptionRects = {}, Callback = callback, X = x + 12, Y = contentOrigin.Y + y, W = w, H = h, _y = y
         }
-
-        function item:ToggleExpand()
-            if self.Expanded then
-                -- remove option drawings
-                for _,r in ipairs(optionRects) do removeDrawing(r.rect); removeDrawing(r.txt) end
-                optionRects = {}
-                self.Expanded = false
-            else
-                -- create option drawings
-                for i,opt in ipairs(self.Options) do
-                    local oy = self.Y + i * 26
-                    local r = createDrawing("Square", {
-                        Color = Theme.Panel,
-                        Transparency = 1,
-                        Size = Vector2.new(self.W, 24),
-                        Position = Vector2.new(self.X, oy),
-                        Filled = true,
-                        Visible = true,
-                        ZIndex = 6
-                    })
-                    local t = createDrawing("Text", {
-                        Text = tostring(opt),
-                        Color = Theme.Text,
-                        Position = Vector2.new(self.X + 6, oy + 4),
-                        Size = 14,
-                        Outline = true,
-                        Visible = true,
-                        ZIndex = 7
-                    })
-                    table.insert(optionRects, {rect = r, txt = t, value = opt, oy = oy})
-                end
-                self.Expanded = true
-            end
-        end
-
-        table.insert(section.Items, item)
-        win._cursorY = win._cursorY + 36
+        table.insert(section.items, item)
         return item
     end
 
-    -- Add Color Picker (RGB sliders)
     function win:AddColorPicker(section, label, default, callback)
-        section = section or (win._activePage and win._activePage.Elements[1])
-        default = default or Color3.fromRGB(Theme.Accent.R*255, Theme.Accent.G*255, Theme.Accent.B*255)
+        section = section or (win._activePage and win._activePage.sections[1])
+        if not section then return end
+        default = default or win.Theme.Accent
         local r = math.floor(default.R * 255); local g = math.floor(default.G * 255); local b = math.floor(default.B * 255)
-        local lbl = label or "Color"
-        local y = section._yOffset + (#section.Items * 90)
-        local baseX = section._origin.X + 12
-
-        local preview = createDrawing("Square", {
-            Color = default,
-            Transparency = 1,
-            Size = Vector2.new(48,48),
-            Position = Vector2.new(baseX, win._contentOrigin.Y + y),
-            Filled = true,
-            Visible = true,
-            ZIndex = 7
+        local y = section._y + (#section.items * 92) + 8
+        local baseX = contentOrigin.X + 12
+        local preview = newDraw("Square", {
+            Color = Color3.fromRGB(r,g,b), Transparency = 1, Filled = true,
+            Position = Vector2.new(baseX, contentOrigin.Y + y), Size = Vector2.new(48,48), Visible = true, ZIndex = win._zIndex + 7
         })
-        local title = createDrawing("Text", {
-            Text = lbl,
-            Color = Theme.Text,
-            Position = Vector2.new(baseX + 56, win._contentOrigin.Y + y + 2),
-            Size = 15,
-            Outline = true,
-            Visible = true,
-            ZIndex = 8
+        local title = newDraw("Text", {
+            Text = label, Color = win.Theme.Text, Position = Vector2.new(baseX + 56, contentOrigin.Y + y + 2),
+            Size = 15, Outline = true, Visible = true, ZIndex = win._zIndex + 8
         })
 
-        local function makeRGBSlider(offsetY, labelText, initVal)
-            local barW = win.Size.X - 120
+        local function makeSlider(offY, lblText, init)
             local bx = baseX + 56
-            local by = win._contentOrigin.Y + y + offsetY
-            local bg = createDrawing("Square", {
-                Color = Theme.Panel, Transparency = 1,
-                Size = Vector2.new(barW, 8), Position = Vector2.new(bx, by), Filled = true, Visible = true, ZIndex = 7
-            })
-            local fill = createDrawing("Square", {
-                Color = Color3.fromRGB(initVal, initVal, initVal), Transparency = 1,
-                Size = Vector2.new((initVal/255)*barW, 8), Position = Vector2.new(bx, by), Filled = true, Visible = true, ZIndex = 8
-            })
-            local lab = createDrawing("Text", { Text = labelText .. ": " .. tostring(initVal), Color = Theme.Text, Position = Vector2.new(bx, by - 18), Size = 13, Outline = true, Visible = true, ZIndex = 9 })
-            return { Bg = bg, Fill = fill, Label = lab, X = bx, Y = by, W = barW, Value = initVal }
+            local by = contentOrigin.Y + y + offY
+            local barW = win.Size.X - 120
+            local bg = newDraw("Square", { Color = win.Theme.Panel, Transparency = 1, Filled = true, Position = Vector2.new(bx, by), Size = Vector2.new(barW, 8), Visible = true, ZIndex = win._zIndex + 7 })
+            local fill = newDraw("Square", { Color = Color3.fromRGB(init,init,init), Transparency = 1, Filled = true, Position = Vector2.new(bx, by), Size = Vector2.new((init/255)*barW, 8), Visible = true, ZIndex = win._zIndex + 8 })
+            local lab = newDraw("Text", { Text = lblText .. ": " .. tostring(init), Color = win.Theme.Text, Position = Vector2.new(bx, by - 18), Size = 13, Outline = true, Visible = true, ZIndex = win._zIndex + 9 })
+            return { Bg = bg, Fill = fill, Label = lab, X = bx, Y = by, W = barW, Value = init }
         end
 
-        local sR = makeRGBSlider(0, "R", r)
-        local sG = makeRGBSlider(28, "G", g)
-        local sB = makeRGBSlider(56, "B", b)
+        local sR = makeSlider(0, "R", r)
+        local sG = makeSlider(28, "G", g)
+        local sB = makeSlider(56, "B", b)
 
-        -- update preview helper
-        local function updatePreview()
+        local item = { Type = "ColorPicker", Preview = preview, Title = title, R = sR, G = sG, B = sB, Update = function()
             preview.Color = Color3.fromRGB(sR.Value, sG.Value, sB.Value)
             if callback then pcall(callback, preview.Color) end
-        end
-
-        local item = { Type = "ColorPicker", Preview = preview, R = sR, G = sG, B = sB, Update = updatePreview }
-        table.insert(section.Items, item)
-        win._cursorY = win._cursorY + 92
+        end, _y = y }
+        table.insert(section.items, item)
         return item
     end
 
-    -- Add TextBox (captures keyboard input)
     function win:AddTextBox(section, placeholder, callback)
-        section = section or (win._activePage and win._activePage.Elements[1])
-        local y = section._yOffset + (#section.Items * 34)
-        local x = section._origin.X
+        section = section or (win._activePage and win._activePage.sections[1])
+        if not section then return end
+        local y = section._y + (#section.items * 36) + 8
+        local x = contentOrigin.X
         local w = win.Size.X - 60
         local h = 24
-        local box = createDrawing("Square", {
-            Color = Theme.Panel,
-            Size = Vector2.new(w, h),
-            Position = Vector2.new(x + 12, win._contentOrigin.Y + y),
-            Filled = true,
-            Visible = true,
-            ZIndex = 6
+        local box = newDraw("Square", {
+            Color = win.Theme.Panel, Transparency = 1, Filled = true,
+            Position = Vector2.new(x + 12, contentOrigin.Y + y), Size = Vector2.new(w, h), Visible = true, ZIndex = win._zIndex + 6
         })
-        local txt = createDrawing("Text", {
-            Text = placeholder or "",
-            Color = Theme.SubText,
-            Position = Vector2.new(x + 18, win._contentOrigin.Y + y + 4),
-            Size = 14,
-            Outline = true,
-            Visible = true,
-            ZIndex = 7
+        local txt = newDraw("Text", {
+            Text = placeholder or "", Color = win.Theme.SubText,
+            Position = Vector2.new(x + 18, contentOrigin.Y + y + 4), Size = 14, Outline = true, Visible = true, ZIndex = win._zIndex + 7
         })
-        local textValue = ""
-        local focused = false
-        local item = { Type = "TextBox", Box = box, Text = txt, Value = textValue, Focus = focused, Callback = callback, X = x + 12, Y = win._contentOrigin.Y + y, W = w, H = h }
-        table.insert(section.Items, item)
-        win._cursorY = win._cursorY + 34
-
-        -- Input handling: focus on click; keyboard via UserInputService
+        local item = { Type = "TextBox", Box = box, Text = txt, Value = "", Placeholder = placeholder or "", Callback = callback, Focus = false, X = x + 12, Y = contentOrigin.Y + y, W = w, H = h, _y = y }
+        table.insert(section.items, item)
         return item
     end
 
-    -- store ui into global for loops
+    -- Toggle visibility
+    function win:Toggle()
+        self.Visible = not self.Visible
+        if bg then bg.Visible = self.Visible end
+        if header then header.Visible = self.Visible end
+        if titleText then titleText.Visible = self.Visible end
+        if closeText then closeText.Visible = self.Visible end
+        for _,t in ipairs(self._tabs) do
+            if t.drawRect then t.drawRect.Visible = self.Visible end
+            if t.drawText then t.drawText.Visible = self.Visible end
+            if t.page then
+                for _,s in ipairs(t.page.sections) do
+                    if s.headerRect then s.headerRect.Visible = self.Visible end
+                    if s.headerText then s.headerText.Visible = self.Visible end
+                    for _,it in ipairs(s.items) do
+                        if it.Type == "Button" then it.Rect.Visible = self.Visible; it.Text.Visible = self.Visible
+                        elseif it.Type == "Toggle" then it.Box.Visible = self.Visible; it.Label.Visible = self.Visible
+                        elseif it.Type == "Slider" then it.Bg.Visible = self.Visible; it.Fill.Visible = self.Visible; it.Label.Visible = self.Visible
+                        elseif it.Type == "Dropdown" then it.Box.Visible = self.Visible; it.Label.Visible = self.Visible
+                            if it.OptionRects then for _,r in ipairs(it.OptionRects) do r.rect.Visible = self.Visible; r.txt.Visible = self.Visible end end
+                        elseif it.Type == "ColorPicker" then it.Preview.Visible = self.Visible; it.Title.Visible = self.Visible
+                            for _,s in ipairs({it.R, it.G, it.B}) do s.Bg.Visible = self.Visible; s.Fill.Visible = self.Visible; s.Label.Visible = self.Visible end
+                        elseif it.Type == "TextBox" then it.Box.Visible = self.Visible; it.Text.Visible = self.Visible end
+                    end
+                end
+            end
+        end
+    end
+
+    function win:SetTheme(theme)
+        for k,v in pairs(theme or {}) do win.Theme[k] = v end
+        -- update immediate colors
+        if bg then bg.Color = win.Theme.Background end
+        if header then header.Color = win.Theme.Panel end
+        if titleText then titleText.Color = win.Theme.Text end
+        if closeText then closeText.Color = win.Theme.Text end
+        -- update tab/button/item colors
+        for _,t in ipairs(win._tabs) do
+            if t.drawRect then t.drawRect.Color = win.Theme.Panel end
+            if t.drawText then t.drawText.Color = win.Theme.Text end
+            if t.page then
+                for _,s in ipairs(t.page.sections) do
+                    if s.headerRect then s.headerRect.Color = win.Theme.Panel end
+                    if s.headerText then s.headerText.Color = win.Theme.Text end
+                    for _,it in ipairs(s.items) do
+                        if it.Type == "Button" then it.Rect.Color = win.Theme.Panel; it.Text.Color = win.Theme.Text
+                        elseif it.Type == "Toggle" then it.Box.Color = it.State and win.Theme.Accent or win.Theme.Panel; it.Label.Color = win.Theme.Text
+                        elseif it.Type == "Slider" then it.Bg.Color = win.Theme.Panel; it.Fill.Color = win.Theme.Accent; it.Label.Color = win.Theme.Text
+                        elseif it.Type == "Dropdown" then it.Box.Color = win.Theme.Panel; it.Label.Color = win.Theme.Text
+                            if it.OptionRects then for _,r in ipairs(it.OptionRects) do r.rect.Color = win.Theme.Panel; r.txt.Color = win.Theme.Text end end
+                        elseif it.Type == "ColorPicker" then it.Title.Color = win.Theme.Text; it.Preview.Color = it.Preview.Color
+                            for _,s in ipairs({it.R, it.G, it.B}) do s.Bg.Color = win.Theme.Panel; s.Fill.Color = Color3.fromRGB(s.Value,s.Value,s.Value); s.Label.Color = win.Theme.Text end
+                        elseif it.Type == "TextBox" then it.Box.Color = win.Theme.Panel; it.Text.Color = it.Value == "" and win.Theme.SubText or win.Theme.Text end
+                    end
+                end
+            end
+        end
+    end
+
+    function win:Destroy()
+        self._running = false
+        -- remove all drawings belonging to this window by cleaning CreatedDrawings via cleanupAll()
+        cleanupAll()
+    end
+
+    -- ---------- Input & update loop (polling, uses Player:GetMouse + ismouse1pressed + iskeypressed) ----------
+    -- prev key map for edge detection
+    local prevKeys = {}
+    local prevMouse = false
+
+    -- helper: check key edge
+    local function keyDownEdge(vk)
+        local cur = (pcall(function() return iskeypressed(vk) end) and iskeypressed(vk)) or false
+        local prev = prevKeys[vk] and true or false
+        prevKeys[vk] = cur
+        return cur and not prev
+    end
+
+    -- helper: mouse left edge
+    local function mouse1DownEdge()
+        local cur = (pcall(function() return ismouse1pressed() end) and ismouse1pressed()) or false
+        local prev = prevMouse
+        prevMouse = cur
+        return cur and not prev
+    end
+
+    -- helper for reading current mouse pos (Player:GetMouse())
+    local function getMousePos()
+        if Mouse and Mouse.X and Mouse.Y then
+            return Vector2.new(Mouse.X, Mouse.Y)
+        end
+        return Vector2.new(0,0)
+    end
+
+    -- keyboard char edge detection: append characters when pressed (A-Z,0-9,space,backspace,enter)
+    local function pollTextboxTyping(textBox)
+        if not textBox then return end
+        -- letters A-Z
+        for code = 0x41, 0x5A do
+            if keyDownEdge(code) then
+                local char = string.char(code)
+                textBox.Value = (textBox.Value or "") .. char
+                textBox.Text.Text = textBox.Value
+            end
+        end
+        -- digits 0-9
+        for code = 0x30, 0x39 do
+            if keyDownEdge(code) then
+                local char = string.char(code)
+                textBox.Value = (textBox.Value or "") .. char
+                textBox.Text.Text = textBox.Value
+            end
+        end
+        -- space
+        if keyDownEdge(VK.SPACE) then
+            textBox.Value = (textBox.Value or "") .. " "
+            textBox.Text.Text = textBox.Value
+        end
+        -- backspace
+        if keyDownEdge(VK.BACKSPACE) then
+            textBox.Value = tostring(textBox.Value or ""):sub(1,-2)
+            textBox.Text.Text = textBox.Value == "" and textBox.Placeholder or textBox.Value
+        end
+        -- enter confirms
+        if keyDownEdge(VK.ENTER) then
+            if textBox.Callback then pcall(textBox.Callback, textBox.Value) end
+            textBox.Focus = false
+            win._focusedTextBox = nil
+        end
+    end
+
+    -- main loop
     win._running = true
-    -- Add an update loop that handles input & redraw interactive states
-    local function step()
-        -- header dragging + detect header clicks to drag or close
-        -- update header hover & close hover
-        local mx, my = Mouse.X, Mouse.Y
-        local posX, posY = win.Position.X, win.Position.Y
-        -- header hover
-        local headerHovered = isMouseInRect(posX, posY, win.Size.X, 28)
-        win._header.Color = headerHovered and Theme.Hover or Theme.Panel
-        -- close hover
-        local closeHovered = isMouseInRect(posX + win.Size.X - 30, posY + 2, 26, 24)
-        win._close.Color = closeHovered and Theme.Hover or Theme.Text
+    task.spawn(function()
+        while win._running do
+            -- small sleep, controls responsiveness
+            TaskWait(0.025)
 
-        -- close click
-        if Mouse.Button1Down and not win._mousePrevDown and closeHovered then
-            -- toggle visibility
-            win.Visible = not win.Visible
-            win._bg.Visible = win.Visible
-            win._header.Visible = win.Visible
-            win._title.Visible = win.Visible
-            win._close.Visible = win.Visible
-            for _,btn in ipairs(win._tabButtons) do btn.Rect.Visible = win.Visible; btn.Text.Visible = win.Visible end
-            for _,page in pairs(win._pages) do
-                for _,s in ipairs(page.Elements) do
-                    if s._headerRect then s._headerRect.Visible = win.Visible end
-                    if s._headerText then s._headerText.Visible = win.Visible end
-                    for _,it in ipairs(s.Items) do
-                        -- set visible for item components conservatively
-                        if it.Rect then it.Rect.Visible = win.Visible end
-                        if it.Text then it.Text.Visible = win.Visible end
-                        if it.Box then it.Box.Visible = win.Visible end
-                        if it.Label then it.Label.Visible = win.Visible end
-                        if it.Bg then it.Bg.Visible = win.Visible end
-                        if it.Fill then it.Fill.Visible = win.Visible end
-                        if it.Preview then it.Preview.Visible = win.Visible end
-                        if it.Txt then it.Txt.Visible = win.Visible end
-                    end
+            -- basic toggle UI via Delete key edge
+            if keyDownEdge(VK.DELETE) then
+                win:Toggle()
+            end
+
+            if not win.Visible then
+                -- still update prev inputs to avoid sticky edges
+                prevMouse = (pcall(function() return ismouse1pressed() end) and ismouse1pressed()) or false
+                for k,_ in pairs(prevKeys) do prevKeys[k] = (pcall(function() return iskeypressed(k) end) and iskeypressed(k)) or false end
+                TaskWait(0.02)
+                goto continue
+            end
+
+            local mpos = getMousePos()
+            local mx, my = mpos.X, mpos.Y
+            -- close button hover + click
+            local closeHovered = insideRect(win.Position.X + win.Size.X - 28, win.Position.Y + 2, 24, 22, mx, my)
+            closeText.Color = closeHovered and win.Theme.Hover or win.Theme.Text
+            if mouse1DownEdge() and closeHovered then
+                win:Toggle()
+            end
+
+            -- header drag start
+            local headerHovered = insideRect(win.Position.X, win.Position.Y, win.Size.X, 28, mx, my)
+            if mouse1DownEdge() and headerHovered then
+                win._dragging = true
+                win._dragOffset = Vector2.new(mx - win.Position.X, my - win.Position.Y)
+            end
+            -- dragging movement
+            if (pcall(function() return ismouse1pressed() end) and ismouse1pressed()) and win._dragging then
+                win.Position = Vector2.new(mx - win._dragOffset.X, my - win._dragOffset.Y)
+                repositionAll()
+            else
+                win._dragging = false
+            end
+
+            -- Tab clicks
+            for _,tab in ipairs(win._tabs) do
+                local bx = tab.drawRect.Position.X; local by = tab.drawRect.Position.Y
+                local bw = tab.drawRect.Size.X; local bh = tab.drawRect.Size.Y
+                if insideRect(bx,by,bw,bh, mx, my) and mouse1DownEdge() then
+                    -- select this tab's page
+                    for _,t2 in ipairs(win._tabs) do if t2.drawRect then t2.drawRect.Color = win.Theme.Panel end end
+                    tab.drawRect.Color = win.Theme.Accent
+                    win._activePage = tab.page
                 end
             end
-        end
 
-        -- dragging start
-        if Mouse.Button1Down and headerHovered and not win._mousePrevDown then
-            win._dragging = true
-            win._dragOffset = Vector2.new(Mouse.X - win.Position.X, Mouse.Y - win.Position.Y)
-        end
-        -- dragging end
-        if not Mouse.Button1Down and win._dragging then
-            win._dragging = false
-        end
-        -- dragging move
-        if win._dragging then
-            win.Position = Vector2.new(Mouse.X - win._dragOffset.X, Mouse.Y - win._dragOffset.Y)
-            -- move header/bg/title/close/tab buttons/content elements by displacement
-            win._bg.Position = win.Position
-            win._header.Position = Vector2.new(win.Position.X, win.Position.Y)
-            win._title.Position = Vector2.new(win.Position.X + 10, win.Position.Y + 5)
-            win._close.Position = Vector2.new(win.Position.X + win.Size.X - 24, win.Position.Y + 4)
-            -- update tab button positions
-            for i,btn in ipairs(win._tabButtons) do
-                local bx = win.Position.X + 8 + (i - 1) * 100
-                btn.Rect.Position = Vector2.new(bx, win.Position.Y + 32)
-                btn.Text.Position = Vector2.new(bx + 8, win.Position.Y + 34)
-            end
-            -- update section positions & items (simple approach: reposition everything based on content origin)
-            win._contentOrigin = Vector2.new(win.Position.X + 10, win.Position.Y + 38)
-            for _,page in pairs(win._pages) do
-                for sIndex,s in ipairs(page.Elements) do
-                    local sy = 0
-                    if s._headerRect then
-                        s._headerRect.Position = Vector2.new(win._contentOrigin.X, win._contentOrigin.Y + s._yOffset - (win._cursorY - s._yOffset))
-                        s._headerText.Position = Vector2.new(win._contentOrigin.X + 8, win._contentOrigin.Y + s._yOffset - (win._cursorY - s._yOffset) + 4)
-                    end
-                    for i,it in ipairs(s.Items) do
+            -- iterate active page elements
+            local page = win._activePage
+            if page then
+                for _,section in ipairs(page.sections) do
+                    for _,it in ipairs(section.items) do
                         if it.Type == "Button" then
-                            it.Rect.Position = Vector2.new(win._contentOrigin.X + 6, s._origin.Y + (s._yOffset - s._yOffset) + (i-1)*34 + (win._contentOrigin.Y - s._origin.Y))
-                            it.Text.Position = Vector2.new(win._contentOrigin.X + 12, s._origin.Y + (s._yOffset - s._yOffset) + (i-1)*34 + (win._contentOrigin.Y - s._origin.Y) + 6)
-                        end
-                    end
-                end
-            end
-        end
-
-        -- Tab click handling
-        for _,btn in ipairs(win._tabButtons) do
-            local bx,by = btn.Rect.Position.X, btn.Rect.Position.Y
-            local bw,bh = btn.Rect.Size.X, btn.Rect.Size.Y
-            if isMouseInRect(bx,by,bw,bh) and Mouse.Button1Down and not win._mousePrevDown then
-                -- select
-                for _,b2 in ipairs(win._tabButtons) do b2.Rect.Color = Theme.Panel end
-                btn.Rect.Color = Theme.Accent
-                win._activePage = btn.Page
-            end
-        end
-
-        -- iterate active page items and handle click/drag/keyboard
-        if win._activePage then
-            for _,section in ipairs(win._activePage.Elements) do
-                for _,item in ipairs(section.Items) do
-                    if item.Type == "Button" then
-                        if isMouseInRect(item.X, item.Y, item.W, item.H) then
-                            item.Rect.Color = Theme.Hover
-                            if Mouse.Button1Down and not win._mousePrevDown then
-                                pcall(item.Callback)
-                                -- flash
-                                item.Rect.Color = Theme.Accent
-                                task_wait(0.08)
-                                item.Rect.Color = Theme.Panel
+                            if insideRect(it.X, it.Y, it.W, it.H, mx, my) then
+                                it.Rect.Color = win.Theme.Hover
+                                if mouse1DownEdge() and it.Callback then pcall(it.Callback) end
+                            else
+                                it.Rect.Color = win.Theme.Panel
                             end
-                        else
-                            item.Rect.Color = Theme.Panel
-                        end
-                    elseif item.Type == "Toggle" then
-                        if isMouseInRect(item.X, item.Y, item.W + 120, item.H) and Mouse.Button1Down and not win._mousePrevDown then
-                            item.State = not item.State
-                            item.Box.Color = item.State and Theme.Accent or Theme.Panel
-                            if item.Callback then pcall(item.Callback, item.State) end
-                        end
-                    elseif item.Type == "Slider" then
-                        -- dragging slider
-                        if Mouse.Button1Down and isMouseInRect(item.X, item.Y - 8, item.W, item.H + 16) then
-                            local rel = clamp((Mouse.X - item.X) / item.W, 0, 1)
-                            item.Value = math.floor(item.Min + (item.Max - item.Min) * rel + 0.5)
-                            item.Fill.Size = Vector2.new(item.W * clamp((item.Value - item.Min)/(item.Max - item.Min),0,1), item.Fill.Size.Y)
-                            item.Label.Text = item.Label.Text:match("^[^:]+:") .. " " .. tostring(item.Value)
-                            if item.Callback then pcall(item.Callback, item.Value) end
-                        end
-                    elseif item.Type == "Dropdown" then
-                        -- box click toggles expand
-                        if isMouseInRect(item.X, item.Y, item.W, item.H) and Mouse.Button1Down and not win._mousePrevDown then
-                            if item.Expanded then item:ToggleExpand() else item:ToggleExpand() end
-                        end
-                        -- check options if expanded
-                        if item.Expanded then
-                            for _,r in ipairs(Created) do
-                                -- handled by optionRects stored per item via item. ToggleExpand. Simpler: check global created objects near the area
+                        elseif it.Type == "Toggle" then
+                            if insideRect(it.X, it.Y, it.W+150, it.H, mx, my) and mouse1DownEdge() then
+                                it.State = not it.State
+                                it.Box.Color = it.State and win.Theme.Accent or win.Theme.Panel
+                                if it.Callback then pcall(it.Callback, it.State) end
                             end
-                            -- We can't easily map created objects back without storing - but we stored optionRects inside item via ToggleExpand closure; handle clicks by iterating Created and checking Y positions:
-                            -- Simpler approach: re-walk optionRects if present
-                            if item.Expanded and item.Options then
-                                for i,opt in ipairs(item.Options) do
-                                    local oy = item.Y + i*26
-                                    if isMouseInRect(item.X, oy, item.W, 24) and Mouse.Button1Down and not win._mousePrevDown then
-                                        item.Current = opt
-                                        item.Label.Text = (item.Label.Text:match("^[^:]+:") or "") .. ": " .. tostring(opt)
-                                        if item.Callback then pcall(item.Callback, opt) end
-                                        -- collapse by removing all Expanded rects text entries (we didn't keep references here to avoid overcomplicating)
-                                        -- Instead, set Expanded = false and rely on UX (option drawings are persistent until toggled off via ToggleExpand earlier)
-                                        item.Expanded = false
+                        elseif it.Type == "Slider" then
+                            if (pcall(function() return ismouse1pressed() end) and ismouse1pressed()) and insideRect(it.X, it.Y-8, it.W, it.H+16, mx, my) then
+                                local rel = clamp((mx - it.X) / it.W, 0, 1)
+                                local val = it.Min + (it.Max - it.Min) * rel
+                                -- snap to step
+                                if it.Step and it.Step > 0 then
+                                    val = math.floor(val / it.Step + 0.5) * it.Step
+                                end
+                                it.Value = val
+                                it.Fill.Size = Vector2.new(it.W * clamp((it.Value - it.Min)/(it.Max - it.Min), 0, 1), it.Fill.Size.Y)
+                                it.Label.Text = (it.Label.Text:match("^[^:]+:") or "") .. " " .. tostring(math.floor(it.Value + 0.5))
+                                if it.Callback then pcall(it.Callback, it.Value) end
+                            end
+                        elseif it.Type == "Dropdown" then
+                            if insideRect(it.X, it.Y, it.W, it.H, mx, my) and mouse1DownEdge() then
+                                if it.Expanded then
+                                    -- collapse & remove option rects
+                                    if it.OptionRects then
+                                        for _,r in ipairs(it.OptionRects) do removeDraw(r.rect); removeDraw(r.txt) end
+                                        it.OptionRects = nil
+                                    end
+                                    it.Expanded = false
+                                else
+                                    -- expand
+                                    it.OptionRects = it.OptionRects or {}
+                                    for idx,opt in ipairs(it.Options) do
+                                        local oy = it.Box.Position.Y + idx*26
+                                        local r = newDraw("Square", { Color = win.Theme.Panel, Transparency = 1, Filled = true, Position = Vector2.new(it.Box.Position.X, oy), Size = Vector2.new(it.W, 24), Visible = true, ZIndex = win._zIndex + 8 })
+                                        local t = newDraw("Text", { Text = tostring(opt), Color = win.Theme.Text, Position = Vector2.new(it.Box.Position.X + 6, oy + 4), Size = 14, Outline = true, Visible = true, ZIndex = win._zIndex + 9 })
+                                        table.insert(it.OptionRects, { rect = r, txt = t, value = opt, oy = oy })
+                                    end
+                                    it.Expanded = true
+                                end
+                            end
+                            -- if expanded, handle option clicks
+                            if it.Expanded and it.OptionRects then
+                                for _,orow in ipairs(it.OptionRects) do
+                                    if insideRect(orow.rect.Position.X, orow.rect.Position.Y, orow.rect.Size.X, orow.rect.Size.Y, mx, my) and mouse1DownEdge() then
+                                        it.Current = orow.value
+                                        it.Label.Text = (it.Label.Text:match("^[^:]+:") or "") .. ": " .. tostring(it.Current)
+                                        if it.Callback then pcall(it.Callback, it.Current) end
+                                        -- collapse and remove rects
+                                        for _,r in ipairs(it.OptionRects) do removeDraw(r.rect); removeDraw(r.txt) end
+                                        it.OptionRects = nil
+                                        it.Expanded = false
+                                        break
                                     end
                                 end
                             end
-                        end
-                    elseif item.Type == "ColorPicker" then
-                        -- rgb sliders
-                        for _,s in ipairs({item.R, item.G, item.B}) do
-                            if Mouse.Button1Down and isMouseInRect(s.X, s.Y, s.W, 12) then
-                                local rel = clamp((Mouse.X - s.X) / s.W, 0, 1)
-                                s.Value = math.floor(rel * 255)
-                                s.Fill.Size = Vector2.new(s.W * rel, s.Fill.Size.Y)
-                                s.Label.Text = s.Label.Text:match("^[^:]+:") .. " " .. tostring(s.Value)
-                                item.Preview.Color = Color3.fromRGB(item.R.Value, item.G.Value, item.B.Value)
-                                if item.Update then pcall(item.Update) end
+                        elseif it.Type == "ColorPicker" then
+                            -- each sub-slider
+                            for _,sl in ipairs({it.R, it.G, it.B}) do
+                                if (pcall(function() return ismouse1pressed() end) and ismouse1pressed()) and insideRect(sl.X, sl.Y, sl.W, 12, mx, my) then
+                                    local rel = clamp((mx - sl.X) / sl.W, 0, 1)
+                                    sl.Value = math.floor(rel * 255)
+                                    sl.Fill.Size = Vector2.new(sl.W * rel, sl.Fill.Size.Y)
+                                    sl.Label.Text = (sl.Label.Text:match("^[^:]+:") or "") .. " " .. tostring(sl.Value)
+                                    it.Preview.Color = Color3.fromRGB(it.R.Value, it.G.Value, it.B.Value)
+                                    if it.Update then pcall(it.Update) end
+                                end
+                            end
+                        elseif it.Type == "TextBox" then
+                            -- click to focus
+                            if insideRect(it.X, it.Y, it.W, it.H, mx, my) and mouse1DownEdge() then
+                                -- focus this textbox
+                                for _,p in ipairs(win._pages) do end
+                                it.Focus = true
+                                win._focusedTextBox = it
+                                it.Text.Color = win.Theme.Text
+                                it.Text.Text = it.Value ~= "" and it.Value or ""
                             end
                         end
-                    elseif item.Type == "TextBox" then
-                        -- click to focus
-                        if isMouseInRect(item.X, item.Y, item.W, item.H) and Mouse.Button1Down and not win._mousePrevDown then
-                            -- toggle focus
-                            item.Focus = true
-                            win._focusedTextbox = item
-                            item.Text.Color = Theme.Text
-                        end
                     end
                 end
             end
+
+            -- handle typing for focused textbox
+            if win._focusedTextBox then pollTextboxTyping(win._focusedTextBox) end
+
+            ::continue::
         end
+    end)
 
-        -- keyboard input for focused textbox
-        if UserInputService and win._focusedTextbox then
-            -- handled by InputBegan below (we hook once)
-        end
+    -- return API for created window
+    local API = {}
+    function API:AddTab(name) return win:AddTab(name) end
+    function API:AddSection(page,title) return win:AddSection(page,title) end
+    function API:AddButton(section,label,cb) return win:AddButton(section,label,cb) end
+    function API:AddToggle(section,label,default,cb) return win:AddToggle(section,label,default,cb) end
+    function API:AddSlider(section,label,min,max,default,step,cb) return win:AddSlider(section,label,min,max,default,step,cb) end
+    function API:AddDropdown(section,label,options,default,cb) return win:AddDropdown(section,label,options,default,cb) end
+    function API:AddColorPicker(section,label,default,cb) return win:AddColorPicker(section,label,default,cb) end
+    function API:AddTextBox(section,placeholder,cb) return win:AddTextBox(section,placeholder,cb) end
+    function API:SetTheme(t) win:SetTheme(t) end
+    function API:Toggle() win:Toggle() end
+    function API:Destroy() win:Destroy() end
 
-        win._mousePrevDown = Mouse.Button1Down
-    end
+    -- also expose internal window for more control
+    API._internal = win
 
-    -- Hook keyboard for textbox
-    if UserInputService then
-        UserInputService.InputBegan:Connect(function(input, gameProcessed)
-            if gameProcessed then return end
-            if win._focusedTextbox and input.UserInputType == Enum.UserInputType.Keyboard then
-                local key = input.KeyCode and input.KeyCode.Name or tostring(input.KeyCode)
-                -- printable letters/numbers
-                if input.KeyCode == Enum.KeyCode.Backspace then
-                    win._focusedTextbox.Value = tostring(win._focusedTextbox.Value):sub(1, -2)
-                    win._focusedTextbox.Text.Text = win._focusedTextbox.Value ~= "" and win._focusedTextbox.Value or ""
-                elseif input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.Escape then
-                    -- finalize
-                    if win._focusedTextbox.Callback then pcall(win._focusedTextbox.Callback, win._focusedTextbox.Value) end
-                    win._focusedTextbox.Focus = false
-                    win._focusedTextbox = nil
-                else
-                    -- Input.Text property not available in all envs; try input.KeyCode.Name for alnum (simple)
-                    local char = input.KeyCode.Name
-                    -- map A-Z and 0-9
-                    if #char == 1 then
-                        win._focusedTextbox.Value = (win._focusedTextbox.Value or "") .. char
-                        win._focusedTextbox.Text.Text = win._focusedTextbox.Value
-                    else
-                        -- ignore other keys
-                    end
-                end
-            end
-        end)
-    end
-
-    -- Run loop
-    if RunService and RunService.RenderStepped then
-        RunService:BindToRenderStep("MatchaRayfieldRender"..tostring(math.random(1,99999)), Enum.RenderPriority.Last.Value, function()
-            if not win._running then return end
-            step()
-        end)
-    else
-        -- fallback polling loop
-        spawn(function()
-            while win._running do step(); task_wait(0.03) end
-        end)
-    end
-
-    return win
+    return API
 end
 
--- ========== Showcase ==========
+-- return library table
+-- Make it callable: MatchaLinoria:CreateWindow(...)
+local Library = {}
+Library.__index = Library
+setmetatable(Library, { __index = MatchaLinoria })
+function Library:CreateWindow(opts) return MatchaLinoria:CreateWindow(opts) end
 
-local window = UI.NewWindow({Title = "MatchaRayfield - Linoria Demo", Position = Vector2.new(220,90), Size = Vector2.new(600,420)})
+-- ========== Showcase (using library we just built) ==========
+local UI = Library
+local win = UI:CreateWindow({ Title = "MatchaLinoria Demo", Size = Vector2.new(620,420), Position = Vector2.new(220, 90) })
 
-local main = window:AddTab("Main")
-local adv = window:AddTab("Advanced")
-local settings = window:AddTab("Settings")
+-- build tabs/pages/sections
+local mainPage = win:AddTab("Main")
+local advPage = win:AddTab("Advanced")
+local setPage = win:AddTab("Settings")
 
--- Main tab content
-local s1 = window:AddSection(main, "Interactive")
-window:AddButton(s1, "Say Hello", function() print("Hello from Linoria-style drawing UI!") end)
-local tog = window:AddToggle(s1, "Enable Feature", false, function(state) print("Toggle changed:", state) end)
-local slider = window:AddSlider(s1, "Power", 0, 100, 40, function(v) print("Slider:", v) end)
+local mainSection = win:AddSection(mainPage, "General")
+local advSection = win:AddSection(advPage, "Visuals")
+local setSection = win:AddSection(setPage, "Controls")
 
--- Advanced
-local s2 = window:AddSection(adv, "Visuals")
-local dropdown = window:AddDropdown(s2, "Mode", {"Stealth","Aggressive","Support"}, "Stealth", function(choice) print("Dropdown ->", choice) end)
-local cp = window:AddColorPicker(s2, "Accent Color", Color3.fromRGB(0,150,255), function(c) print("Color ->", c) end)
-local tb = window:AddTextBox(s2, "Name...", function(txt) print("TextBox confirmed:", txt) end)
+-- Buttons
+win:AddButton(mainSection, "Say Hello", function() printl("[Demo] Hello!") end)
+win:AddButton(mainSection, "Timestamp", function() printl("[Demo] " .. os.date("%Y-%m-%d %H:%M:%S")) end)
 
--- Settings
-local s3 = window:AddSection(settings, "Options")
-window:AddButton(s3, "Apply Accent", function()
-    if cp and cp.Preview then
-        local c = cp.Preview.Color
-        Theme.Accent = c
-        print("Applied accent to theme:", c)
-    end
-end)
+-- Toggles
+win:AddToggle(mainSection, "Enable Feature", false, function(s) printl("[Demo] Feature:", s) end)
+win:AddToggle(mainSection, "Auto Print", true, function(s) printl("[Demo] AutoPrint:", s) end)
 
-print("MatchaRayfield Linoria demo loaded (Drawing-based).")
+-- Slider
+win:AddSlider(mainSection, "Power", 0, 100, 42, 1, function(v) printl("[Demo] Power ->", math.floor(v + 0.5)) end)
+
+-- Dropdown
+win:AddDropdown(advSection, "Mode", {"Stealth","Aggressive","Support","Custom"}, "Stealth", function(c) printl("[Demo] Mode:", c) end)
+
+-- Color picker
+local cp = win:AddColorPicker(advSection, "Accent", Color3.fromRGB(0,150,255), function(c) printl("[Demo] Color:", c) end)
+
+-- Textbox
+local tb = win:AddTextBox(setSection, "Enter name...", function(txt) printl("[Demo] Name entered:", txt) end)
+
+printl("[MatchaLinoria] Demo loaded. Press Delete to toggle UI visibility.")
+return Library
